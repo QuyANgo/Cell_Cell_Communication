@@ -1,0 +1,599 @@
+---
+title: "CrOv.9patients - cellchat - LC from 20221122 - SB.BN - 20221122"
+author: "Quy A. Ngo"
+date: '2022-11-22'
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", include = FALSE, echo = FALSE, message = FALSE, warning = FALSE)
+options(future.globals.maxSize = 48000 * 1024^2)
+setwd("/home/localadmin/Desktop/RESEARCH/SBobisse/Analysis/CrOv_TCR.GEX/20221122_LC_cellchat")
+```
+
+
+```{r load libraries}
+library(Seurat)
+library(harmony)
+library(scater)
+library(CellChat)
+library(patchwork)
+library(ggalluvial)
+library(ComplexHeatmap)
+library(circlize)
+library(NMF)
+library(SingleR)
+library(celldex)
+library(RColorBrewer)
+library(randomcoloR)
+library(tidyverse)
+library(clustree)
+library(future)
+
+options(stringsAsFactors = F)
+```
+
+
+```{r load LCsubset, eval=FALSE}
+LC <- readRDS("../20221122_HarLC_cellchat/LCsubset_from_mergedData.noIG_20221122.rds")
+#LC <- DietSeurat(LC, counts = TRUE, data = TRUE, scale.data = FALSE) # already done on previous LC subset
+```
+
+
+# -----------------------------------------------------------------
+# -----------------------------------------------------------------
+# 2) Analysis of LC subset
+```{r LC subset analysis, eval=FALSE}
+
+# Apply pipeline
+# normalize
+LC <- as.SingleCellExperiment(LC)
+cl100 = scran::quickCluster(LC, min.size = 100) # can change this default min.size
+LC = scran::computeSumFactors(LC, cluster = cl100)
+LC = scater::logNormCounts(LC,
+                            log = T,
+                            transform = "log",
+                            pseudo_count = 1)
+LC <- as.Seurat(LC, counts = "counts", data = "logcounts")
+LC <- SetIdent(LC, value = "orig.ident")
+
+# QC of normalized merged Data
+pdf('LC_UMIcounts_before&after_normalization_20221122.pdf',
+    width = 10, height = 7)
+  par(mfrow = c(1,2))
+
+  hist(colSums(LC@assays$RNA@counts),
+       breaks = 100,
+       col = 'wheat',
+       main = paste0("LC", " before normalization"),
+       xlab = "Sum of expression")
+
+  hist(colSums(LC@assays$RNA@data),
+       breaks = 100,
+       col = 'wheat',
+       main = paste0("LC", " after normalization"),
+       xlab = "Sum of expression")
+
+dev.off()
+
+#saveRDS(LC, "LC_norm_20221122.rds")
+
+# scale & regress
+LC <- ScaleData(LC, 
+                 features = rownames(LC),
+                 vars.to.regress = c("nCount_RNA", "nFeature_RNA", "CCdiff",
+                                     "percent.mt", "percent.ribo"))
+
+# Find HVGs using default parameters
+LC <- FindVariableFeatures(LC,
+                            selection.method = "vst",
+                            nfeatures = 2000,
+                            mean.function = ExpMean,
+                            dispersion.function = LogVMR,
+                            num.bin = 40,
+                            binning.method = "equal_width", # "equal_frequency"
+                            mean.cutoff = c(0.1, 8), #c(0.0125, 4),
+                            dispersion.cutoff = c(0.5, Inf)) #c(0, Inf)) # c(0, 0.4)
+
+# Dimensional reduction with PCA, use 100pc
+LC <- RunPCA(LC,
+              features = VariableFeatures(LC),
+              npcs = 100,
+              ndims.print = 1:10,
+              nfeatures.print = 10,
+              reduction.key = 'PC_',
+              reduction.name = 'PCA')
+
+saveRDS(LC, "LC_norm.scale.regress.hvg.100pc_20221122.rds")
+
+```
+
+
+
+```{r run Harmony on LC with PCA, eval=FALSE}
+
+LC <- readRDS("LC_norm.scale.regress.hvg.100pc_20221122.rds")
+HarLC <- RunHarmony(
+  object = LC,
+  group.by.vars = c("patient"), # covariates to be removed, affected by theta & lambda below
+  reduction = "PCA",
+  dims.use = 1:100, # default all PCs
+  theta = 2, # default; larger for more diverse clusters, 0 for no diversity
+  lambda = 1, # default; smaller results in more aggressive correction
+  sigma = 0.1, # default; larger results in cells assigned to more cluster
+  #nclust = NULL, # 1 = simple linear regression
+  #tau = 0, # expected number of cells per cluster, protection against overclustering small datasets with larger ones
+  block.size = 0.05, # default; larger -> faster but less accurate
+  max.iter.harmony = 10,
+  max.iter.cluster = 20,
+  epsilon.cluster = -Inf, # set to -Inf to never stop convergence early
+  epsilon.harmony = -Inf, # set to -Inf to never stop convergence early
+  plot_convergence = TRUE,
+  verbose = TRUE,
+  reference_values = NULL,
+  reduction.save = "Harmony",
+  assay.use = "RNA",
+  project.dim = TRUE
+)
+
+HarLC$ident <- NULL
+
+# VizDimLoading plot
+pdf("HarLC_topGenes_associated_with_50Harmonys_20221122.pdf", width = 22, height = 50)
+VizDimLoadings(HarLC, dims = 1:50, reduction = "Harmony", ncol = 5) + # patchwork object
+  plot_annotation(title = "HarLC top genes associated with 50 Harmonys")
+dev.off()
+
+# Heatmap of top 20 HVGs associated with the first 50 Harmonys
+pdf("HarLC_heatmap_of_top20.HVGs_50Harmonys_20221122.pdf", width = 14, height = 30)
+DimHeatmap(HarLC, dims = 1:50, cells = 500, nfeatures = 20, ncol = 5,
+           reduction = 'Harmony', assays = 'RNA', slot = 'scale.data',
+           balanced = TRUE, combine = TRUE, fast = FALSE) +
+  plot_annotation("HarLC - heatmap of top 20 HVGs in 50 Harmonys")
+dev.off()
+
+# Find the best numbers of harmony PCs
+pdf("HarLC_ElbowPlot_20221122.pdf")
+ElbowPlot(HarLC, ndims = 100, reduction = "Harmony")
+dev.off()
+
+saveRDS(HarLC, "HarLC_20221122.rds")
+rm(LC); invisible(gc); gc()
+
+```
+
+
+```{r find optimal pc & k with clustree}
+for (i in c(30, 35, 40)) {
+  for (k in c(20, 25, 30)) {
+    hLC <- FindNeighbors(HarLC, 
+                         reduction = "Harmony", # VERY IMPORTANT: "Harmony" !!!!
+                         dims = 1:i, # as found by Elbow plot
+                         k.param = k, # default 20, can also test 30
+                         annoy.metric = "euclidean" # default "euclidean"; can also test "cosine"
+                         )
+    hLC <- FindClusters(hLC, resolution = seq(0.1, 2, 0.1))
+    
+    # Use clustree to look at clusterings at different resolution
+    pdf(paste0("HarLC_clustree.", i, "pca.k", k, "_20221122.pdf"), width = 9, height = 16)
+    print(clustree(hLC, prefix = "RNA_snn_res."))
+    dev.off()
+    rm(hLC); invisible(gc()); gc()
+  }
+}
+
+rm(i,k)
+```
+
+
+```{r function to find optimal umap with various pc, k, res & min.dist}
+
+# From above results, check umap clusters & feature plots with stable resolutions of selected pc, k & res
+cellType <- c("CD3E", "CD79A", "CD14", "CD8A", "CD4", "KLRD1", "C1QA", "VCAN", "CD1C")
+
+optimUmap.pc.k.res <- function(pc, k, res) {
+  hLC <- FindNeighbors(HarLC, 
+                       reduction = "Harmony", # VERY IMPORTANT: "Harmony" !!!!
+                       dims = 1:pc, # as found by Elbow plot
+                       k.param = k, # default 20, can also test 30
+                       annoy.metric = "euclidean" # default "euclidean"; can also test "cosine"
+                       )
+  hLC <- FindClusters(hLC, resolution = res)
+    
+  cluster_colors <- distinctColorPalette(length(unique(hLC$seurat_clusters)))
+  #for (d in c(0.1, 0.2, 0.3)) {
+    hLC <- RunUMAP(hLC,
+                   reduction = "Harmony",  
+                   dims = 1:pc,
+                   n.neighbors = k, #default 30, range 5-50, large n for preserved global structure while loss of detailed local structure, use same k as in FindNeighbors for consistent results!!! 
+                   min.dist = 0.2, #default 0.3, range 0.001-0.5, large dist for evenly distributed embedded points, small for optimizing accuracy of local structure
+                   spread = 1, 
+                   metric = "cosine", #default "cosine" to separate clusters better than "euclidean"
+                   seed.use = 1)
+    pdf(paste0("HarLC_umap.lineage_", pc, "pc.k", k,"_", res,"res_", "0.2dist_20221122.pdf"), width = 15, height = 14)
+    print(DimPlot(hLC, reduction = "umap", group.by = "seurat_clusters",
+                  label = T, repel = F, label.size = 5,
+                  cols = cluster_colors) + #default active.ident = "seurat_clusters"
+      plot_annotation(title = paste0("umap ", pc, "pc.k", k,"_", res, "res"),
+                      theme = theme(plot.title = element_text(size = 24))
+                      ))
+    print(FeaturePlot(hLC,
+                      features = cellType,
+                      reduction = "umap", slot = "data",
+                      cols = rev(brewer.pal(11, "Spectral")),
+                      label = TRUE, repel = FALSE, label.size = 2, label.color = "magenta",
+                      order = TRUE, by.col = TRUE, combine = T, ncol = 3
+                      )
+         +
+      plot_annotation(title = paste0("canonical cell type markers ", pc, "pc.k", k,"_", res, "res"),
+                      theme = theme(plot.title = element_text(size = 24))
+                      ))
+    dev.off()
+  #}
+   rm(hLC); invisible(gc()); gc()
+}
+
+```
+
+
+```{r find umap with optimal pc, k & res}
+
+optimUmap.pc.k.res(30, 20, 0.3)
+optimUmap.pc.k.res(30, 25, 0.6)
+optimUmap.pc.k.res(30, 30, 0.7)
+optimUmap.pc.k.res(35, 20, 0.8) # select this!!!
+optimUmap.pc.k.res(35, 25, 0.8)
+optimUmap.pc.k.res(35, 30, 0.7)
+optimUmap.pc.k.res(40, 25, 0.5)
+
+```
+
+
+
+```{r selected HarLC}
+# rerun FindNeighbors & FindClusters of HarLC with 40pc, 30k, res 1.3
+#HarLC <- readRDS("HarLC_20221122.rds")
+
+hLC <- FindNeighbors(HarLC, 
+                     reduction = "Harmony", # VERY IMPORTANT: "Harmony" !!!!
+                     dims = 1:35, # as found by Elbow plot
+                     k.param = 20, # default 20, can also test 30
+                     annoy.metric = "euclidean" # default "euclidean"; can also test "cosine"
+                     )
+hLC <- FindClusters(hLC, resolution = 0.8)
+    
+cluster_colors <- distinctColorPalette(length(unique(hLC$seurat_clusters)))
+  #for (d in c(0.1, 0.2, 0.3)) {
+hLC <- RunUMAP(hLC,
+               reduction = "Harmony",  
+               dims = 1:35,
+               n.neighbors = 20, #default 30, range 5-50, large n for preserved global structure while loss of detailed local structure, use same k as in FindNeighbors for consistent results!!! 
+               min.dist = 0.2, #default 0.3, range 0.001-0.5, large dist for evenly distributed embedded points, small for optimizing accuracy of local structure
+               spread = 1, 
+               metric = "cosine", #default "cosine" to separate clusters better than "euclidean"
+               seed.use = 1)
+
+## Tabulate cells by cluster ID, replicate, or both
+cellNumber <- c(table(Idents(hLC)))
+cell_proportion <- c(prop.table(table(Idents(hLC))))
+
+saveRDS(hLC, "HarLC_35pc.k20_0.8res_umap-0.2dist_20221122.rds")
+rm(HarLC, clustInfo, cell_proportion, cellNumber, i,k, optimUmap.pc.k.res); invisible(gc()); gc()
+
+```
+
+
+
+```{r dimplot of processed HarLC, fig.width=12, fig.height=12}
+hLC <- readRDS("HarLC_35pc.k20_0.8res_umap-0.2dist_20221122.rds")
+
+cluster_colors <- distinctColorPalette(length(unique(hLC$seurat_clusters)))
+#cluster_colors <- c("#E4AE48", "#5FDC90", "#C3EAC1", "#8A965B", "#E4D9C6", "#D85EA4", "#DAC9DF", "#EAA4D9", "#53A0DB", "#DA9597", "#6BE5C8", "#B1A8E8", "#90C1E1", "#8253D5", "#D6E750", "#EE5275", "#B8E8E7", "#73E751", "#FF6600", "#9431EB", "#E94EDB", "#D682E4", "#7B7FDE", "#DCB687", "#D56A4B", "#B4EA99", "#E3DE87", "#719494", "#63D9E2")
+pdf("CrOv.9patients_HarLC_dimplot_for.clusters_35pc.k20_0.8res_0.2dist_20221122.pdf",
+    width = 12, height = 12)
+DimPlot(hLC, reduction = "umap", group.by = "seurat_clusters",
+              label = T, repel = F, label.size = 6,
+              cols = cluster_colors)
+dev.off()
+```
+
+
+
+# SingleR with celldex to label cells
+```{r load Monaco reference}
+Monaco <- MonacoImmuneData(cell.ont = "none")
+blEnc <- BlueprintEncodeData(cell.ont = "none")
+```
+
+
+```{r obtain celldex data}
+exp <- GetAssayData(hLC, "data")
+main.Monaco <- SingleR(test = exp, ref = Monaco, labels = Monaco$label.main)
+fine.Monaco <- SingleR(test = exp, ref = Monaco, labels = Monaco$label.fine)
+main.blEnc <- SingleR(test = exp, ref = blEnc, labels = blEnc$label.main)
+fine.blEnc <- SingleR(test = exp, ref = blEnc, labels = blEnc$label.fine)
+
+table(main.Monaco$pruned.labels)
+table(fine.Monaco$pruned.labels)
+table(main.blEnc$pruned.labels)
+table(fine.blEnc$pruned.labels)
+
+write.table(main.Monaco, "CrOv.9patients_HarLC_SingleRlabels.Monaco.main_20221122.txt", quote = F, sep = "\t", row.names = T, col.names = NA)
+write.table(fine.Monaco, "CrOv.9patients_HarLC_SingleRlabels.Monaco.fine_20221122.txt", quote = F, sep = "\t", row.names = T, col.names = NA)
+write.table(main.blEnc, "CrOv.9patients_HarLC_SingleRlabels.blueprintEncode.main_20221122.txt", quote = F, sep = "\t", row.names = T, col.names = NA)
+write.table(fine.blEnc, "CrOv.9patients_HarLC_SingleRlabels.blueprintEncode.fine_20221122.txt", quote = F, sep = "\t", row.names = T, col.names = NA)
+
+```
+
+
+
+```{r annotation diagnostics}
+plotScoreHeatmap(main.Monaco)
+plotScoreHeatmap(fine.Monaco)
+plotDeltaDistribution(main.Monaco, ncol = 4)
+plotDeltaDistribution(fine.Monaco, ncol = 4)
+
+plotScoreHeatmap(main.blEnc)
+plotScoreHeatmap(fine.blEnc)
+plotDeltaDistribution(main.blEnc, ncol = 4)
+plotDeltaDistribution(fine.blEnc, ncol = 4)
+```
+
+
+
+```{r add labels to hLC}
+hLC <- AddMetaData(hLC, main.Monaco$pruned.labels, col.name = "Monaco.main")
+hLC <- AddMetaData(hLC, fine.Monaco$pruned.labels, col.name = "Monaco.fine")
+hLC$Monaco.main <- factor(hLC$Monaco.main, levels = unique(hLC$Monaco.main))
+hLC$Monaco.fine <- factor(hLC$Monaco.fine, levels = unique(hLC$Monaco.fine))
+
+hLC <- AddMetaData(hLC, main.blEnc$pruned.labels, col.name = "blueprintEncode.main")
+hLC <- AddMetaData(hLC, fine.blEnc$pruned.labels, col.name = "blueprintEncode.fine")
+hLC$blueprintEncode.main <- factor(hLC$blueprintEncode.main, levels = unique(hLC$blueprintEncode.main))
+hLC$blueprintEncode.fine <- factor(hLC$blueprintEncode.fine, levels = unique(hLC$blueprintEncode.fine))
+
+saveRDS(hLC, "CrOv.9patients_HarLC_Monaco-BlueprintENCODE.labels_20221122.rds")
+```
+
+
+
+```{r Dimplot, fig.width=13, fig.height=12}
+
+colorMainMonaco <- distinctColorPalette(length(unique(hLC$Monaco.main)))
+colorFineMonaco <- distinctColorPalette(length(unique(hLC$Monaco.fine)))
+colorMainBlEnc <- distinctColorPalette(length(unique(hLC$blueprintEncode.main)))
+colorFineBlEnc <- distinctColorPalette(length(unique(hLC$blueprintEncode.fine)))
+
+p1 <- DimPlot(hLC, reduction = "umap", group.by = "Monaco.main",
+              label = T, repel = T, label.size = 7.5,
+              cols = colorMainMonaco
+) #default active.ident = "seurat_clusters"
+p1
+p2 <- DimPlot(hLC, reduction = "umap", group.by = "Monaco.fine",
+              label = T, repel = T, label.size = 6,
+              cols = colorFineMonaco
+)
+p2
+
+p3 <- DimPlot(hLC, reduction = "umap", group.by = "blueprintEncode.main",
+              label = T, repel = T, label.size = 7.5,
+              cols = colorMainBlEnc
+) #default active.ident = "seurat_clusters"
+p3
+p4 <- DimPlot(hLC, reduction = "umap", group.by = "blueprintEncode.fine",
+              label = T, repel = T, label.size = 6,
+              cols = colorFineBlEnc
+)
+p4
+
+pdf("CrOv.9patients_HarLC_Monaco-BlueprintENCODE.labels_20221122.pdf", width = 13, height = 12)
+p1; p2; p3; p4
+dev.off()
+```
+
+
+
+```{r function for featureplot of markers}
+
+hLC <- readRDS("CrOv.9patients_HarLC_Monaco-BlueprintENCODE.labels_20221122.rds")
+
+# lineage markers
+lineage <- c("CD3E", "CD79A", "C1QA", "CD8A", "CD4", "KLRD1", "VCAN", "CD1C", "CD14")
+naive = c("LEF1", "TCF7", "SELL")
+CM = c("CCR7", "IL7R", "LMNA")
+EM = c("GZMK", "CXCR3", "CXCR4")
+TEMRA = c("KLRG1", "CX3CR1", "FGFBP2")
+Trm = c("ZNF683", "CXCR6", "ITGAE")
+Tpex = c("XCL1", "CD200", "GNG4")
+Tchkpt = c("HAVCR2", "PDCD1", "LAYN")
+MAIT = c("SLC4A10", "TRAV1-2", "KLRB1")
+
+exhaustion.inhibition = c("PDCD1", "TIGIT", "HAVCR2", "LAG3", "CTLA4", "CD244", "KLRG1", "TNFRSF14", "BTLA", "CD160") #4r
+activation = c("CD38", "CD28", "CD69", "CD40LG", "ENTPD1", "IL2RA", "ICOS", "TNFRSF4", "TNFRSF9", "HLA-DRA") #4r
+effector.cytokine = c("GZMA", "GZMB", "GZMH", "GZMK", "GZMM", "PRF1", "NKG7", "GNLY", "IFNG", "FASLG", "TNF", "IL17A", "IL2") #5r
+effector.molecule = c("CXCL13", "CCL3", "CCL4", "CCL5", "CST7") #2r
+transcription.factor = c("LEF1", "TCF7", "EOMES", "NR4A1", "TBX21", "PRDM1", "TOX", "GATA3", "ID2", "ID3", "ZNF683", "FOXP3", "MKI67", "TOP2A", "FOS", "JUN") #6r
+NK.gamma.delta = c("KLRD1", "KIR2DL4", "KLRC3", "TRGV9", "TRDV1", "TRDC")  #2r
+chemokine.receptor = c("CCR4", "CCR5", "CXCR3", "CXCR4", "CXCR5") #2r
+
+#markers <- list(lineage, naive, CM, EM, TEMRA, Trm, Tpex, Tchkpt, MAIT)
+
+markerFeaturePlot <- function(i,k) {
+  pdf(paste0("CrOv.9patients_HarLC_featurePlots_", k, "_markers_20221122.pdf"), width = 18, height = 2*length(i))
+  print(FeaturePlot(hLC,
+                    features = i,
+                    reduction = "umap", slot = "data",
+                    cols = rev(brewer.pal(11, "Spectral")),
+                    label = TRUE, repel = FALSE, label.size = 4, label.color = "magenta",
+                    order = TRUE, by.col = TRUE, combine = T, ncol = 3
+  ) +
+    plot_annotation(title = paste(k, "markers"),
+                    theme = theme(plot.title = element_text(size = 24, face = "bold"))
+    ))
+  dev.off()
+}
+
+```
+
+
+## Expression of selected markers on umap
+```{r feature plot for selected markers, include=TRUE, fig.width=18, fig.height=6}
+markerFeaturePlot(lineage, "lineage")
+markerFeaturePlot(naive, "CD8.naive")
+markerFeaturePlot(CM, "CD8.CM")
+markerFeaturePlot(EM, "CD8.EM")
+markerFeaturePlot(TEMRA, "CD8.TEMRA")
+markerFeaturePlot(Trm, "CD8.Trm")
+markerFeaturePlot(Tpex, "CD8.pex")
+markerFeaturePlot(Tchkpt, "CD8.chkptHi")
+markerFeaturePlot(MAIT, "CD8.MAIT")
+
+markerFeaturePlot(exhaustion.inhibition, "exh.inh")
+markerFeaturePlot(activation, "activation")
+markerFeaturePlot(effector.cytokine, "eff.ctk")
+markerFeaturePlot(effector.molecule, "eff.mol")
+markerFeaturePlot(chemokine.receptor, "chemR")
+markerFeaturePlot(NK.gamma.delta, "NKgd")
+markerFeaturePlot(transcription.factor, "TFs")
+
+```
+
+
+
+# ------------------------------------------------------------------------
+# Cluster-specific markers from DE analysis with LR, |log2FC| > 0.25, fdr0.05, min.pct0.1
+```{r Find cluster-specific markers, eval=FALSE}
+
+# For each cluster, find genes DE compared to all other clusters
+#allMarkers <- function(i, ...){
+hLC.Markers <- FindAllMarkers(hLC, 
+                                  only.pos = F, 
+                                  min.pct = 0.1, # at least 10% of cells in either cluster express the genes
+                                  logfc.threshold = 0.25,   # 0.58496 = 1.5x, default=0.25
+                                  min.cells.feature = 3,
+                                  min.cells.group = 3,
+                                  pseudocount.use = 0.1, # 1 as default
+                                  return.thresh = 0.05, # p-value
+                                  assay = 'RNA',
+                                  slot = 'data',
+                                  test.use = "LR" # best scDE method according to Libra package is LR
+)
+hLC.Markers <- hLC.Markers %>% 
+  data.table::setnames(c("p_val_adj", "avg_log2FC"), c("padj", "log2FC")) %>%
+  arrange(cluster, -log2FC)
+  #filter(p_val_adj <= 0.05) %>% 
+  #arrange(cluster, desc(log2FC))
+write.table(hLC.Markers,
+            paste0("CrOv.9patients_HarLC_all.markers_35pc.k20_0.8res_", "LR",
+                   "_lfc0.25_fdr5_minpct10_20221122.txt"),
+            append = F, quote = F, sep = "\t", row.names = F, col.names = T)
+#}
+#i <- "LR"
+#allMarkers(i)
+
+```
+
+
+# ----------------------------------------------------------------------
+# cluster labels
+```{r label clusters on umap, fig.width=13, fig.height=12, include=TRUE}
+
+hLC <- RenameIdents(hLC,
+                      `0` = "c0.CD4.CM", `1` = "c1.CD8.EM", `2` = "c2.Treg",
+                      `3` = "c3.B", `4` = "c4.DPcycling", `5` = "c5.NK.TEMRA",
+                      `6` = "c6.CD8.Tpex", `7` = "c7.DP", `8` = "c8.macrophage",
+                      `9` = "c9.DP.naive", `10` = "c10.NK.gdT", `11` = "c11.monocyte", 
+                      `12` = "c12.plasmablast", `13` = "c13.CD8T", `14` = "c14.pDC",
+                      `15` = "c15.CD8cycling", `16` = "c16.DP.MT1x", `17` = "c17.B.pDC")
+
+#cluster_colors <- distinctColorPalette(length(unique(hLC$seurat_clusters)))
+cluster_colors <- c("#7AE7AA", "#DA889F", "#D9CBE5", "#CE96E2", "#62A270", "#D7DE8E", "#9142E7", "#969DA1", "#D8E050", "#789FDD", "#E5BDA0", "#8A66CF", "#7DE559", "#E84E79", "#DC924A", "#78DBDE", "#D4E8D1", "#DD59D5")
+p0 <- DimPlot(hLC, reduction = "umap", cols = cluster_colors,
+        label = T, repel = T, label.size = 6
+        )
+p0
+pdf("CrOv.9patients_HarLC_umap_with.labeled.clusters_20221122.pdf", width = 13, height = 12)
+print(p0)
+dev.off()
+
+hLC$cluster_label <- Idents(hLC)
+saveRDS(hLC, "CrOv.9patients_HarLC_labled.clusters_20221122.rds")
+
+```
+
+
+#-----------------------
+# cellchat
+```{r cellchat data}
+cellchat <- createCellChat(object = hLC, group.by = "cluster_label", assay = "RNA")
+levels(cellchat@idents) # show factor levels of the cell labels
+groupSize <- as.numeric(table(cellchat@idents)) # number of cells in each cell group
+
+# set the ligand-receptor interaction database
+CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
+showDatabaseCategory(CellChatDB)
+
+# Show the structure of the database
+dplyr::glimpse(CellChatDB$interaction)
+
+# use a subset of CellChatDB for cell-cell communication analysis
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling") # use Secreted Signaling
+# use all CellChatDB for cell-cell communication analysis
+# CellChatDB.use <- CellChatDB # simply use the default CellChatDB
+
+# set the used database in the object
+cellchat@DB <- CellChatDB.use
+
+future::plan("multiprocess", workers = 4) # do parallel
+cellchat <- subsetData(cellchat) # REQUIRED!!! 
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+```
+
+
+```{r Compute the communication probability and infer cellular communication network}
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1)
+# Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+```
+
+
+```{r extract inferred communications}
+df.net.LR <- subsetCommunication(cellchat) # ligands/receptors level
+df.net.ptwy <- subsetCommunication(cellchat, slot.name = "netP") # signaling pathways level
+
+write.table(df.net.LR, "CrOv.9patients_HarLC.cellchat_inferred.communications_ligands.receptors_20221122.txt",
+            quote = F, sep = "\t", row.names = F, col.names = T)
+write.table(df.net.ptwy, "CrOv.9patients_HarLC.cellchat_inferred.communications_signaling.pathways_20221122.txt",
+            quote = F, sep = "\t", row.names = F, col.names = T)
+```
+
+
+```{r Infer the cell-cell communication at a signaling pathway level}
+cellchat <- computeCommunProbPathway(cellchat)
+# Calculate the aggregated cell-cell communication network
+cellchat <- aggregateNet(cellchat)
+```
+
+
+```{r Visualize the aggregated cell-cell communication network}
+# 
+#groupSize <- as.numeric(table(cellchat@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+
+mat <- cellchat@net$weight
+par(mfrow = c(3,4), xpd=TRUE)
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, edge.weight.max = max(mat), title.name = rownames(mat)[i])
+}
+
+```
+
+
+

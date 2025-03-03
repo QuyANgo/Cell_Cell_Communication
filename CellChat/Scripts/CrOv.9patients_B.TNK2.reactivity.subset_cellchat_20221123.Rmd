@@ -1,0 +1,387 @@
+---
+title: "CrOv.9patients - cellchat - B.TNK2reac.tumorReactivity subset - AH.SB.BN - 20221123"
+author: "Quy A. Ngo"
+date: '2022-11-23'
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", include = FALSE, echo = FALSE, message = FALSE, warning = FALSE)
+options(future.globals.maxSize = 48000 * 1024^2)
+setwd("/home/localadmin/Desktop/RESEARCH/SBobisse/Analysis/CrOv_TCR.GEX/20221123_LC.reactivity_cellchat")
+```
+
+
+```{r load libraries}
+library(Seurat)
+library(scater)
+library(CellChat)
+library(patchwork)
+library(ggalluvial)
+library(ComplexHeatmap)
+library(circlize)
+library(NMF)
+library(SingleR)
+library(celldex)
+library(RColorBrewer)
+library(randomcoloR)
+library(tidyverse)
+library(clustree)
+library(future)
+
+options(stringsAsFactors = F)
+```
+
+
+```{r load objects}
+intgHar <- readRDS("../20221121_intgHar_cellchat/CrOv.9patients_intgHar_labled.clusters_20221122.rds")
+intgHarTNK2 <- readRDS("../20220901_TNK1.2_from_20220713/intgHarTNK2_elbow_46pc.k30_1.9res_umap-0.1dist_factorized_subcluster16_20220909.rds")
+```
+
+
+```{r prepare data for cellchat}
+# extract B cells from intgHar
+B <- subset(intgHar, 
+            subset = cluster_label %in% c("c6.B", "c25.B", "c28.B", "c16.plasmablast")
+            )
+Bcellname <- FetchData(B, vars = "reactivity") %>% rownames_to_column(var = "cellID")
+Bcellname$reactivity <- factor(Bcellname$reactivity, levels = unique(Bcellname$reactivity)) 
+Btr <- Bcellname %>% group_by(reactivity) %>% summarise(cellNb = n())
+
+# examine cells with tested tumor reactivity per cluster in intgHar
+tr <- subset(intgHar,
+             subset = reactivity %in% c("reactive", "nonreactive"))
+tr.df <- FetchData(tr, vars = c("cluster_label", "reactivity"))
+tr.df$reactivity <- factor(tr.df$reactivity, levels = unique(tr.df$reactivity))
+tr.df <- tr.df %>% group_by(cluster_label, reactivity, .drop = F) %>% summarise(cellNb = n())
+
+pdf("CrOv.9patients_intgHar_barplot_cell.number_with.tested.reactivity_per.cluster_20221123.pdf",
+    width = 12, height = 10)
+ggplot(tr.df, aes(x = cluster_label, y = cellNb, fill = reactivity)) +
+  geom_bar(stat = "identity") + # geom_col does NOT use stat as geom_bar
+  ggtitle("Number of tested-reactivity cells per cluster in CrOv.9patients_intgHar") +
+  theme_classic() +
+  scale_fill_manual(values = c("tomato", "lightblue")) +
+  scale_x_discrete(expand = c(0,0, 0,0)) +
+  scale_y_continuous(expand = c(0.01,0, 0.03,0), breaks = c(0, 10, 25, 50, 100, 200, 300, 400)) +
+  ylab("Total cell number with tested reactivity") +
+  geom_text(aes(label = cellNb), size = 3, hjust = 1, vjust = 0.5, position = "stack") +
+  theme(axis.text = element_text(size = 12),
+        plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 16),
+        axis.ticks.y = element_blank(),
+        panel.grid.major.x = element_line(colour = "black", size = 0.5, linetype = "dotted"), 
+        legend.title = element_text(size = 16, face = "bold"),
+        legend.text = element_text(size = 16)
+        ) +
+  coord_flip()
+dev.off()
+
+# extract tested-reactivity cells from intgHarTNK2
+TNK2tr <- subset(intgHarTNK2,
+                 subset = reactivity %in% c("reactive", "nonreactive"))
+tr2.df <- FetchData(TNK2tr, vars = c("subcluster", "reactivity"))
+
+# extract cells from intgHar matching tested-reactivity cells of intgHarTNK2
+intgHar$CellName <- colnames(intgHar) # create CellName metadata column with all cell names of intgHar
+TNK2.TR <- subset(intgHar,
+                  subset = CellName %in% c(rownames(tr2.df)))
+TNK2.TR$CellName <- NULL
+
+
+# add subcluster ID of intgHarTNK2 to B
+tr2.df <- rownames_to_column(tr2.df, var = "cellID") 
+meta <- full_join(tr2.df, Bcellname, by = "cellID") %>% 
+  mutate_all(~replace(., is.na(.), "ND")) %>% 
+  mutate(newtype = ifelse(reactivity.x == "reactive", "Treactive",
+                          ifelse(reactivity.x == "nonreactive", "Tnonreactive",
+                                 "Bcells"))) %>%
+  select(cellID, subcluster, newtype) %>% 
+  column_to_rownames(var = "cellID")
+meta$newtype <- factor(meta$newtype, levels = unique(meta$newtype))
+
+# merge B and TNK2.TR into 1 object for cellchat
+B.TNK2TR <- merge(B, TNK2.TR)
+B.TNK2TR <- AddMetaData(B.TNK2TR, metadata = meta)
+
+# save object
+saveRDS(B.TNK2TR, "CrOv.9patients_Har.B.TNK2TR.subset_20221123.rds")
+rm(intgHar, B, Bcellname, Btr, tr, tr.df, intgHarTNK2, TNK2tr, tr2.df, TNK2.TR, meta); invisible(gc()); gc()
+```
+
+
+#-----------------------
+# 1. load expression data for cellchat
+```{r cellchat data}
+#B.TK2TR <- readRDS("CrOv.9patients_Har.B.TNK2TR.subset_20221123.rds")
+
+cellchat <- createCellChat(object = B.TNK2TR, group.by = "newtype", assay = "RNA")
+levels(cellchat@idents) # show factor levels of the cell labels
+groupSize <- as.numeric(table(cellchat@idents)) # number of cells in each cell group
+groupSize
+
+saveRDS(cellchat, "CrOv.9patients_cellchat.from_B.TNK2TR_20221123.rds")
+
+#rm(B.TNK2TR); invisible(gc()); gc()
+```
+
+
+# 2. set the ligand-receptor interaction database
+```{r set interaction database usage}
+# cellchat <- readRDS("CrOv.9patients_cellchat.from_B.TNK2TR_20221123.rds")
+# groupSize <- as.numeric(table(cellchat@idents)) # number of cells in each cell group
+# groupSize
+
+CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
+showDatabaseCategory(CellChatDB)
+
+# Show the structure of the database
+#dplyr::glimpse(CellChatDB$interaction)
+
+# use a subset of CellChatDB for cell-cell communication analysis
+#CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling") # use Secreted Signaling
+
+# use all CellChatDB for cell-cell communication analysis
+CellChatDB.use <- CellChatDB # simply use the default CellChatDB
+
+# set the used interaction database in cellchat object
+cellchat@DB <- CellChatDB.use
+```
+
+
+# 3. preprocess expression data for cell-cell communication analysis
+```{r identify over-expressed Ls & Rs in different cell group}
+future::plan("multicore", workers = 4) # do parallel
+
+cellchat <- subsetData(cellchat) # REQUIRED!!! 
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+# project gene expression data onto PPI (NOTE: remember to set `raw.use = FALSE` in the function `computeCommunProb()` downstream in order to use the projected data)
+#cellchat <- projectData(cellchat, PPI.human)
+```
+
+
+# 4. infer cell-cell communication network
+```{r Compute the communication probability and infer cellular communication network}
+
+# 4a. at L-R levels
+cellchat <- computeCommunProb(cellchat, 
+                              type = "truncatedMean", trim = 0.1, raw.use = T
+                              ) #default is 25%, limit to genes expressed in at least 10% of cells in each cluster
+# Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+# 4b. at signaling pathway level}
+cellchat <- computeCommunProbPathway(cellchat)
+
+```
+
+
+```{r extract inferred communications}
+df.net.LR <- subsetCommunication(cellchat) # ligands/receptors level
+df.net.ptwy <- subsetCommunication(cellchat, slot.name = "netP") # signaling pathways level
+
+write.table(df.net.LR, "CrOv.9patients_B.TNK2reac.cellchat_inferred.communications_ligands.receptors_20221123.txt",
+            quote = F, sep = "\t", row.names = F, col.names = T)
+write.table(df.net.ptwy, "CrOv.9patients_B.TNK2reac.cellchat_inferred.communications_signaling.pathways_20221123.txt",
+            quote = F, sep = "\t", row.names = F, col.names = T)
+```
+
+
+```{r calculate the aggregated cell-cell communication network}
+cellchat <- aggregateNet(cellchat)
+```
+
+
+```{r Visualize the aggregated cell-cell communication network, fig.width=8, fig.height=8}
+
+# LR levels
+pdf("CrOv.9patients_B.TNK2reac.cellchat_LR.communication.networks_all.cell.groups_20221123.pdf",
+    width = 6, height = 6)
+#par(mfrow = c(1,2), xpd=TRUE)
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, margin = 0.3, title.name = "Number of interactions")
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, margin = 0.3, title.name = "Interaction weights/strength")
+dev.off()
+
+```
+
+
+```{r visualize communication per cell group, fig.width=5, fig.height=5}
+mat <- cellchat@net$weight
+#par(mfrow = c(4,4), xpd=TRUE) # image grid of 4 columns x 4 rows for 14 cell groups
+pdf("CrOv.9patients_B.TNK2reac.cellchat_LR.communications_per_cell.groups_20221123.pdf",
+    width = 5, height = 5)
+for (i in 1:nrow(mat)) {
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, edge.weight.max = max(mat), vertex.label.cex = 0.5, title.name = rownames(mat)[i])
+}
+dev.off()
+
+
+```
+
+
+```{r visualization per signaling pathway network, fig.width=6, fig.height=7}
+sigPtwy <- c(cellchat@netP$pathways)
+
+#i <- c("CXCL")
+for (i in sigPtwy) {
+# Hierarchy plot
+# Here we define `vertex.receive` so that the left portion of the hierarchy plot shows signaling to fibroblast and the right portion shows signaling to immune cells 
+#  vertex.receiver = seq(1,3) # a numeric vector. 
+#  netVisual_aggregate(cellchat, signaling = i,  vertex.receiver = vertex.receiver)
+
+  pdf(paste0("CrOv.9patients_B.TNK2reac.cellchat_", i, ".communication.aggregates_20221123.pdf")) 
+    # Circle plot
+  print(netVisual_aggregate(cellchat, signaling = i, layout = "circle"))
+    # Chord diagram
+  print(netVisual_aggregate(cellchat, signaling = i, layout = "chord"))
+    # Heatmap
+  print(netVisual_heatmap(cellchat, signaling = i, color.heatmap = "Reds"))
+    # network contribution
+  print(netAnalysis_contribution(cellchat, signaling = i))
+  
+  # cell-cell communication mediated by a single ligand-receptor pair
+  pairLR <- extractEnrichedLR(cellchat, signaling = i, geneLR.return = FALSE)
+
+    # bubble plot
+  print(netVisual_bubble(cellchat, pairLR.use = pairLR, remove.isolate = F))
+      
+    # violin plot
+  print(plotGeneExpression(cellchat, signaling = i, enriched.only = F))
+  
+    # circle & chord plots
+  for (k in c(pairLR$interaction_name)) {
+      # Circle plot
+    print(netVisual_individual(cellchat, signaling = i, pairLR.use = k, layout = "circle"))
+      # chord diagram
+    print(netVisual_individual(cellchat, signaling = i, pairLR.use = k, layout = "chord"))
+  }
+  
+  dev.off()
+}
+
+# Hierarchy plot
+#vertex.receiver = seq(1,length(pairLR$interaction_name)) # a numeric vector
+#netVisual_individual(cellchat, signaling = i,  pairLR.use = k, vertex.receiver = vertex.receiver)
+```
+
+
+```{r chord diagrams, fig.width=16, fig.height=16}
+  # chord gene
+pdf("CrOv.9patients_B.TNK2reac_chord.gene.diagram_all.networks_20221123.pdf", width = 20, height = 20)
+netVisual_chord_gene(cellchat)
+dev.off()
+
+  # chord cell for signaling pathway level
+pdf("CrOv.9patients_B.TNK2reac_chord.cell.diagram_significantPathways_20221123.pdf")
+for (i in c(cellchat@netP$pathways)) {
+  print(netVisual_chord_cell(cellchat, signaling = i, small.gap = 4, big.gap = 10))
+}
+dev.off()
+
+```
+
+
+```{r save object}
+saveRDS(cellchat, "CrOv.9patients_B.TNK2reac_cellchat.analyzed_20221123.rds")
+```
+# 20221123 STOPS HERE!!!
+
+
+```{r all inferred networks}
+# Access all the signaling pathways showing significant communications
+i.all <- cellchat@netP$pathways
+# check the order of cell identity to set suitable vertex.receiver
+levels(cellchat@idents)
+vertex.receiver = seq(1,4)
+for (i in 1:length(i.all)) {
+  # Visualize communication network associated with both signaling pathway and individual L-R pairs
+  netVisual(cellchat, signaling = i.all[i], vertex.receiver = vertex.receiver, layout = "hierarchy")
+  # Compute and visualize the contribution of each ligand-receptor pair to the overall signaling pathway
+  gg <- netAnalysis_contribution(cellchat, signaling = i.all[i])
+  ggsave(filename=paste0(i.all[i], "_L-R_contribution.pdf"), plot=gg, width = 3, height = 2, units = 'in', dpi = 300)
+}
+
+```
+
+
+```{r bubble plot}
+# show all the significant interactions (L-R pairs) from some cell groups (defined by 'sources.use') to other cell groups (defined by 'targets.use')
+netVisual_bubble(cellchat, sources.use = 4, targets.use = c(5:11), remove.isolate = FALSE)
+
+# show all the significant interactions (L-R pairs) associated with certain signaling pathways
+netVisual_bubble(cellchat, sources.use = 4, targets.use = c(5:11), signaling = c("CCL","CXCL"), remove.isolate = FALSE)
+
+# show all the significant interactions (L-R pairs) based on user's input (defined by `pairLR.use`)
+pairLR.use <- extractEnrichedLR(cellchat, signaling = c("TNF","CXCL","IL16"))
+netVisual_bubble(cellchat, sources.use = c(3,4), targets.use = c(5:8), pairLR.use = pairLR.use, remove.isolate = TRUE)
+
+```
+
+
+```{r chord diagram LR pairs, fig.width=12, fig.height=12}
+# show all the significant interactions (L-R pairs) from some cell groups (defined by 'sources.use') to other cell groups (defined by 'targets.use')
+# show all the interactions sending from Inflam.FIB
+netVisual_chord_gene(cellchat, sources.use = 4, targets.use = c(5:11), lab.cex = 0.5,legend.pos.y = 30)
+
+# show all the interactions received by Inflam.DC
+netVisual_chord_gene(cellchat, sources.use = c(1,2,3,4), targets.use = 8, legend.pos.x = 15)
+
+# show all the significant interactions (L-R pairs) associated with certain signaling pathways
+netVisual_chord_gene(cellchat, sources.use = c(1,2,3,4), targets.use = c(5:11), signaling = c("IL16","CXCL", "TNF", "MIF"),legend.pos.x = 8)
+
+# show all the significant signaling pathways from some cell groups (defined by 'sources.use') to other cell groups (defined by 'targets.use')
+netVisual_chord_gene(cellchat, sources.use = c(1,2,3,4), targets.use = c(5:11), slot.name = "netP", legend.pos.x = 10)
+
+
+```
+
+
+```{r gene expression}
+# We can plot the gene expression distribution of signaling genes related to L-R pairs or signaling pathway using a Seurat wrapper function plotGeneExpression.
+plotGeneExpression(cellchat, signaling = "CXCL")
+
+# By default, plotGeneExpression only shows the expression of signaling genes related to the inferred significant communications. USERS can show the expression of all signaling genes related to one signaling pathway by
+plotGeneExpression(cellchat, signaling = "CXCL", enriched.only = FALSE)
+#Alternatively, USERS can extract the signaling genes related to the inferred L-R pairs or signaling pathway using extractEnrichedLR, and then plot gene expression using Seurat package.
+```
+
+
+# System analysis
+```{r network centrality score}
+# Compute the network centrality scores
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") # the slot 'netP' means the inferred intercellular communication network of signaling pathways
+# Visualize the computed centrality scores using heatmap, allowing ready identification of major signaling roles of cell groups
+netAnalysis_signalingRole_network(cellchat, signaling = i, width = 8, height = 2.5, font.size = 10)
+
+# Visualize dominant senders & receivers in 2D space
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+gg1 <- netAnalysis_signalingRole_scatter(cellchat)
+
+# Signaling role analysis on the cell-cell communication networks of interest
+gg2 <- netAnalysis_signalingRole_scatter(cellchat, signaling = c("CXCL", "IL16"))
+
+gg1 + gg2
+
+#Identify signals contributing most to outgoing or incoming signaling of certain cell groups
+# Signaling role analysis on the aggregated cell-cell communication network from all signaling pathways
+ht1 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing")
+ht2 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming")
+ht1 + ht2
+
+# Signaling role analysis on the cell-cell communication networks of interest
+ht <- netAnalysis_signalingRole_heatmap(cellchat, signaling = c("CXCL", "IL16"))
+ht
+
+
+
+saveRDS(cellchat, "CrOv.9patients_B.TNK2reac_cellchat_20221122.rds")
+```
+
+
+
+
+
